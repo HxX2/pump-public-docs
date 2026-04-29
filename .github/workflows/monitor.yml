@@ -1,8 +1,8 @@
 name: PumpDocs Monitor
 on:
   schedule:
-    - cron: '*/10 * * * *' # Checks every 10 minutes
-  workflow_dispatch:      # Allows you to click "Run Workflow" to test it
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
 
 jobs:
   check_for_updates:
@@ -10,44 +10,58 @@ jobs:
     steps:
       - name: Checkout Fork
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Sync and Detect Changes
-        id: sync
+      - name: Compare Upstream Hash
+        id: check
         run: |
-          git config --global user.name "PumpWatcher"
-          git config --global user.email "bot@pump.fun"
-          git remote add upstream https://github.com/pump-fun/pump-public-docs.git
-          git fetch upstream
+          # 1. Fetch latest commit data from Pump.fun API
+          RESPONSE=$(curl -s https://api.github.com/repos/pump-fun/pump-public-docs/commits/main)
+          UPSTREAM_HASH=$(echo "$RESPONSE" | jq -r .sha)
           
-          # Compare your fork's main with the original's main
-          LOCAL_HASH=$(git rev-parse HEAD)
-          UPSTREAM_HASH=$(git rev-parse upstream/main)
-          
-          if [ "$LOCAL_HASH" != "$UPSTREAM_HASH" ]; then
-            # New commits found!
-            COMMIT_MSG=$(git log upstream/main -1 --pretty=%B)
-            echo "MSG=$COMMIT_MSG" >> $GITHUB_ENV
-            echo "HAS_NEW=true" >> $GITHUB_ENV
+          # 2. Get the last hash we saved
+          touch last_seen_hash.txt
+          LAST_HASH=$(cat last_seen_hash.txt)
+
+          if [ "$UPSTREAM_HASH" != "$LAST_HASH" ]; then
+            # Extract dynamic variables for the embed
+            COMMIT_MSG=$(echo "$RESPONSE" | jq -r .commit.message | head -n 1)
+            SHORT_SHA=$(echo "$UPSTREAM_HASH" | cut -c1-7)
+            TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+            # Export variables to Github Environment
+            echo "NEW_CHANGES=true" >> $GITHUB_ENV
+            echo "LATEST_SHA=$UPSTREAM_HASH" >> $GITHUB_ENV
+            echo "SHORT_SHA=$SHORT_SHA" >> $GITHUB_ENV
+            echo "COMMIT_MSG=$COMMIT_MSG" >> $GITHUB_ENV
+            echo "TIMESTAMP=$TIMESTAMP" >> $GITHUB_ENV
             
-            # Update your fork so we don't trigger the same alert twice
-            git merge upstream/main --ff-only
-            git push origin main
+            # Save state to file and push to fork
+            echo "$UPSTREAM_HASH" > last_seen_hash.txt
+            git config --global user.name "PumpWatcher"
+            git config --global user.email "bot@pump.fun"
+            git add last_seen_hash.txt
+            git commit -m "Track: $SHORT_SHA"
+            git push
           else
-            echo "HAS_NEW=false" >> $GITHUB_ENV
+            echo "NEW_CHANGES=false" >> $GITHUB_ENV
           fi
 
       - name: Send Discord Notification
-        if: env.HAS_NEW == 'true'
+        if: env.NEW_CHANGES == 'true'
         run: |
           curl -H "Content-Type: application/json" \
                -d '{
-                 "embeds": [{
-                   "title": "🚨 Pump.fun Docs Updated!",
-                   "description": "Latest Commit: '"${{ env.MSG }}"'",
-                   "url": "https://github.com/pump-fun/pump-public-docs/commits/main",
-                   "color": 16711680
-                 }]
+                 "embeds": [
+                   {
+                     "title": "🚨 Pump.fun Docs Updated!",
+                     "description": "** **\n**Latest Commit**: `'"${{ env.COMMIT_MSG }}"'`\n**Commit**: ['"${{ env.SHORT_SHA }}"'](https://github.com/pump-fun/pump-public-docs/commit/'"${{ env.LATEST_SHA }}"')\n**​**",
+                     "color": 15409955,
+                     "footer": {
+                       "text": "Github",
+                       "icon_url": "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQQnHBPL3-ZZ6HDtDmOwax0Rump0IFOIRJgmg&s"
+                     },
+                     "timestamp": "'"${{ env.TIMESTAMP }}"'"
+                   }
+                 ]
                }' \
                ${{ secrets.DISCORD_WEBHOOK }}
