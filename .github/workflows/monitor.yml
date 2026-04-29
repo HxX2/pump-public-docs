@@ -1,0 +1,53 @@
+name: PumpDocs Monitor
+on:
+  schedule:
+    - cron: '*/10 * * * *' # Checks every 10 minutes
+  workflow_dispatch:      # Allows you to click "Run Workflow" to test it
+
+jobs:
+  check_for_updates:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Sync and Detect Changes
+        id: sync
+        run: |
+          git config --global user.name "PumpWatcher"
+          git config --global user.email "bot@pump.fun"
+          git remote add upstream https://github.com/pump-fun/pump-public-docs.git
+          git fetch upstream
+          
+          # Compare your fork's main with the original's main
+          LOCAL_HASH=$(git rev-parse HEAD)
+          UPSTREAM_HASH=$(git rev-parse upstream/main)
+          
+          if [ "$LOCAL_HASH" != "$UPSTREAM_HASH" ]; then
+            # New commits found!
+            COMMIT_MSG=$(git log upstream/main -1 --pretty=%B)
+            echo "MSG=$COMMIT_MSG" >> $GITHUB_ENV
+            echo "HAS_NEW=true" >> $GITHUB_ENV
+            
+            # Update your fork so we don't trigger the same alert twice
+            git merge upstream/main --ff-only
+            git push origin main
+          else
+            echo "HAS_NEW=false" >> $GITHUB_ENV
+          fi
+
+      - name: Send Discord Notification
+        if: env.HAS_NEW == 'true'
+        run: |
+          curl -H "Content-Type: application/json" \
+               -d '{
+                 "embeds": [{
+                   "title": "🚨 Pump.fun Docs Updated!",
+                   "description": "Latest Commit: '"${{ env.MSG }}"'",
+                   "url": "https://github.com/pump-fun/pump-public-docs/commits/main",
+                   "color": 16711680
+                 }]
+               }' \
+               ${{ secrets.DISCORD_WEBHOOK }}
